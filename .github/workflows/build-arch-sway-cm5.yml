@@ -1,0 +1,470 @@
+name: Build Arch Linux ARM + Sway for uConsole CM5
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create GitHub release'
+        required: true
+        default: true
+        type: boolean
+
+env:
+  IMAGE_NAME: uconsole-arch-sway-cm5
+  ARCH_TARBALL_URL: "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
+
+jobs:
+  build-arch-sway:
+    name: Build Arch Linux ARM + Sway Image
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            wget \
+            parted \
+            dosfstools \
+            e2fsprogs \
+            arch-install-scripts \
+            libarchive-tools \
+            qemu-user-static \
+            binfmt-support
+
+          # Ensure qemu-aarch64 is enabled
+          sudo update-binfmts --enable qemu-aarch64 || true
+
+      - name: Download Arch Linux ARM rootfs
+        run: |
+          echo "Downloading Arch Linux ARM rootfs..."
+          wget -q --show-progress "${ARCH_TARBALL_URL}" -O ArchLinuxARM-aarch64-latest.tar.gz
+          ls -lh ArchLinuxARM-aarch64-latest.tar.gz
+
+      - name: Create and partition image
+        run: |
+          echo "Creating 8GB image file..."
+          truncate -s 8G ${{ env.IMAGE_NAME }}.img
+
+          echo "Partitioning image..."
+          sudo parted -s ${{ env.IMAGE_NAME }}.img mklabel msdos
+          sudo parted -s ${{ env.IMAGE_NAME }}.img mkpart primary fat32 1MiB 512MiB
+          sudo parted -s ${{ env.IMAGE_NAME }}.img set 1 boot on
+          sudo parted -s ${{ env.IMAGE_NAME }}.img mkpart primary ext4 512MiB 100%
+
+      - name: Setup loop device and format
+        id: loop
+        run: |
+          echo "Setting up loop device..."
+          LOOP_DEVICE=$(sudo losetup -f)
+          sudo losetup -P "${LOOP_DEVICE}" ${{ env.IMAGE_NAME }}.img
+          echo "loop_device=${LOOP_DEVICE}" >> $GITHUB_OUTPUT
+
+          sleep 2
+
+          echo "Formatting partitions..."
+          sudo mkfs.vfat -F32 "${LOOP_DEVICE}p1"
+          sudo mkfs.ext4 -F "${LOOP_DEVICE}p2"
+
+          # Get UUID for cmdline.txt
+          ROOT_UUID=$(sudo blkid -s UUID -o value "${LOOP_DEVICE}p2")
+          echo "root_uuid=${ROOT_UUID}" >> $GITHUB_OUTPUT
+
+      - name: Mount and extract rootfs
+        run: |
+          LOOP_DEVICE="${{ steps.loop.outputs.loop_device }}"
+
+          echo "Mounting partitions..."
+          sudo mkdir -p /mnt/arch
+          sudo mount "${LOOP_DEVICE}p2" /mnt/arch
+          sudo mkdir -p /mnt/arch/boot
+          sudo mount "${LOOP_DEVICE}p1" /mnt/arch/boot
+
+          echo "Extracting Arch Linux ARM rootfs..."
+          sudo bsdtar -xpf ArchLinuxARM-aarch64-latest.tar.gz -C /mnt/arch
+
+          echo "Setting up chroot environment..."
+          sudo mount --bind /dev /mnt/arch/dev
+          sudo mount --bind /dev/pts /mnt/arch/dev/pts
+          sudo mount --bind /proc /mnt/arch/proc
+          sudo mount --bind /sys /mnt/arch/sys
+
+          # Setup DNS
+          sudo cp /etc/resolv.conf /mnt/arch/etc/resolv.conf
+
+      - name: Configure system in chroot
+        run: |
+          # Create setup script
+          cat << 'CHROOT_SCRIPT' | sudo tee /mnt/arch/tmp/setup.sh
+          #!/bin/bash
+          set -e
+
+          echo "==> Initializing pacman keyring..."
+          pacman-key --init
+          pacman-key --populate archlinuxarm
+
+          echo "==> Adding PeterCxy's repository for uConsole CM5 kernel..."
+          cat >> /etc/pacman.conf << 'EOF'
+
+          # uConsole CM5 kernel and packages
+          [petercxy]
+          SigLevel = Optional
+          Server = https://s3-cdn.angry.im/alarm-repo/$arch
+          EOF
+
+          echo "==> Updating system and installing kernel..."
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm linux-clockworkpi-git linux-clockworkpi-git-headers || {
+            echo "Warning: Could not install linux-clockworkpi-git, trying fallback..."
+            pacman -S --noconfirm linux-rpi
+          }
+
+          echo "==> Installing WiFi packages..."
+          pacman -S --noconfirm wpa_supplicant-raspberrypi-git || pacman -S --noconfirm wpa_supplicant
+
+          echo "==> Installing Sway and desktop packages..."
+          pacman -S --noconfirm \
+              sway swaylock swayidle swaybg waybar \
+              foot wofi mako grim slurp wl-clipboard \
+              xdg-desktop-portal-wlr \
+              ttf-dejavu noto-fonts ttf-font-awesome \
+              pipewire pipewire-pulse wireplumber \
+              light brightnessctl \
+              networkmanager network-manager-applet \
+              bluez bluez-utils \
+              polkit \
+              sudo vim nano htop neofetch \
+              git base-devel \
+              firefox
+
+          echo "==> Installing Raspberry Pi utilities..."
+          pacman -S --noconfirm raspberrypi-utils || true
+
+          echo "==> Enabling services..."
+          systemctl enable NetworkManager
+          systemctl enable bluetooth
+          systemctl enable sshd
+
+          echo "==> Creating user..."
+          useradd -m -G wheel,video,audio,input -s /bin/bash uconsole || true
+          echo "uconsole:uconsole" | chpasswd
+
+          echo "==> Configuring sudo..."
+          echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/wheel
+          echo "uconsole ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/uconsole
+
+          echo "==> Setting hostname..."
+          echo "uconsole" > /etc/hostname
+          cat > /etc/hosts << 'EOF'
+          127.0.0.1   localhost
+          ::1         localhost
+          127.0.1.1   uconsole.localdomain uconsole
+          EOF
+
+          echo "==> Setting locale..."
+          echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+          locale-gen
+          echo "LANG=en_US.UTF-8" > /etc/locale.conf
+
+          echo "==> Setting timezone..."
+          ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+
+          echo "==> Cleaning up..."
+          pacman -Scc --noconfirm
+          rm -rf /var/cache/pacman/pkg/*
+
+          echo "==> System configuration complete!"
+          CHROOT_SCRIPT
+
+          sudo chmod +x /mnt/arch/tmp/setup.sh
+          sudo arch-chroot /mnt/arch /tmp/setup.sh
+          sudo rm /mnt/arch/tmp/setup.sh
+
+      - name: Create boot configuration
+        run: |
+          ROOT_UUID="${{ steps.loop.outputs.root_uuid }}"
+
+          echo "Creating config.txt..."
+          sudo tee /mnt/arch/boot/config.txt << 'EOF'
+          # uConsole CM5 Boot Configuration
+          # Generated by GitHub Actions workflow
+
+          [all]
+          arm_64bit=1
+          disable_overscan=1
+          dtparam=audio=on
+          auto_initramfs=1
+          max_framebuffers=2
+
+          # Audio remapping for uConsole speaker
+          dtoverlay=audremap,pins_12_13
+          dtoverlay=dwc2,dr_mode=host
+
+          # Antenna configuration
+          dtparam=ant2
+
+          # SPI for display
+          dtparam=spi=on
+
+          [pi4]
+          # CM4 fallback
+          dtoverlay=clockworkpi-uconsole
+          dtoverlay=vc4-kms-v3d-pi4,cma-384
+          dtparam=pciex1=off
+          enable_uart=1
+
+          [pi5]
+          # CM5 primary configuration
+          dtoverlay=clockworkpi-uconsole-cm5
+          dtoverlay=vc4-kms-v3d-pi5,cma-384
+          dtparam=pciex1=off
+          enable_uart=1
+
+          # Kernel and initramfs
+          kernel=vmlinuz-linux-clockworkpi-git
+          initramfs initramfs-linux-clockworkpi-git.img followkernel
+          EOF
+
+          echo "Creating cmdline.txt..."
+          echo "root=UUID=${ROOT_UUID} rw rootwait console=tty1 loglevel=4" | sudo tee /mnt/arch/boot/cmdline.txt
+
+      - name: Create Sway configuration
+        run: |
+          echo "Creating Sway config directory..."
+          sudo mkdir -p /mnt/arch/home/uconsole/.config/sway
+          sudo mkdir -p /mnt/arch/home/uconsole/.config/waybar
+          sudo mkdir -p /mnt/arch/home/uconsole/.config/foot
+
+          echo "Creating Sway config..."
+          sudo tee /mnt/arch/home/uconsole/.config/sway/config << 'EOF'
+          # Sway configuration for ClockworkPi uConsole
+          # Use Alt as modifier (uConsole has no Super key)
+          set $mod Mod1
+          set $term foot
+          set $menu wofi --show drun
+
+          # Display configuration for uConsole 5" screen
+          output DSI-2 scale 1.2
+
+          # Trackball scroll emulation
+          input type:pointer {
+              scroll_button button3
+              scroll_method on_button_down
+              natural_scroll enabled
+          }
+
+          input type:keyboard {
+              xkb_layout us
+          }
+
+          # Key bindings
+          bindsym $mod+Return exec $term
+          bindsym $mod+d exec $menu
+          bindsym $mod+Shift+q kill
+          bindsym $mod+Shift+c reload
+          bindsym $mod+Shift+e exec swaynag -t warning -m 'Exit sway?' -B 'Yes' 'swaymsg exit'
+
+          # Focus
+          bindsym $mod+h focus left
+          bindsym $mod+j focus down
+          bindsym $mod+k focus up
+          bindsym $mod+l focus right
+          bindsym $mod+Left focus left
+          bindsym $mod+Down focus down
+          bindsym $mod+Up focus up
+          bindsym $mod+Right focus right
+
+          # Move windows
+          bindsym $mod+Shift+h move left
+          bindsym $mod+Shift+j move down
+          bindsym $mod+Shift+k move up
+          bindsym $mod+Shift+l move right
+
+          # Workspaces
+          bindsym $mod+1 workspace number 1
+          bindsym $mod+2 workspace number 2
+          bindsym $mod+3 workspace number 3
+          bindsym $mod+4 workspace number 4
+          bindsym $mod+5 workspace number 5
+
+          bindsym $mod+Shift+1 move container to workspace number 1
+          bindsym $mod+Shift+2 move container to workspace number 2
+          bindsym $mod+Shift+3 move container to workspace number 3
+          bindsym $mod+Shift+4 move container to workspace number 4
+          bindsym $mod+Shift+5 move container to workspace number 5
+
+          # Layout
+          bindsym $mod+b splith
+          bindsym $mod+v splitv
+          bindsym $mod+f fullscreen
+          bindsym $mod+Shift+space floating toggle
+          bindsym $mod+space focus mode_toggle
+          bindsym $mod+r mode "resize"
+
+          mode "resize" {
+              bindsym h resize shrink width 10px
+              bindsym j resize grow height 10px
+              bindsym k resize shrink height 10px
+              bindsym l resize grow width 10px
+              bindsym Return mode "default"
+              bindsym Escape mode "default"
+          }
+
+          # Backlight (discrete steps for uConsole)
+          bindsym --locked XF86MonBrightnessUp exec light -S "$(light -G | awk '{ print (int($1 / 10) + 2) * 10 }')"
+          bindsym --locked XF86MonBrightnessDown exec light -S "$(light -G | awk '{ v = (int($1 / 10) - 2) * 10; print (v < 20 ? 20 : v) }')"
+
+          # Volume
+          bindsym --locked XF86AudioRaiseVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
+          bindsym --locked XF86AudioLowerVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+          bindsym --locked XF86AudioMute exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
+
+          # Screenshot
+          bindsym Print exec grim -g "$(slurp)" - | wl-copy
+
+          # Lock
+          bindsym $mod+Ctrl+l exec swaylock -f -c 000000
+
+          # Idle
+          exec swayidle -w \
+              timeout 300 'swaylock -f -c 000000' \
+              timeout 600 'swaymsg "output * dpms off"' \
+              resume 'swaymsg "output * dpms on"'
+
+          # Status bar
+          bar {
+              position top
+              status_command waybar
+          }
+
+          # Autostart
+          exec mako
+
+          # Styling
+          default_border pixel 2
+          gaps inner 5
+          gaps outer 5
+          EOF
+
+          echo "Creating Waybar config..."
+          sudo tee /mnt/arch/home/uconsole/.config/waybar/config << 'EOF'
+          {
+              "layer": "top",
+              "position": "top",
+              "height": 24,
+              "modules-left": ["sway/workspaces", "sway/mode"],
+              "modules-center": ["sway/window"],
+              "modules-right": ["pulseaudio", "network", "battery", "clock"],
+              "clock": { "format": "{:%H:%M}", "format-alt": "{:%Y-%m-%d}" },
+              "battery": { "format": "{icon} {capacity}%", "format-icons": ["", "", "", "", ""] },
+              "network": { "format-wifi": " {signalStrength}%", "format-disconnected": "" },
+              "pulseaudio": { "format": "{icon} {volume}%", "format-muted": "", "format-icons": { "default": ["", "", ""] } }
+          }
+          EOF
+
+          echo "Creating Foot config..."
+          sudo tee /mnt/arch/home/uconsole/.config/foot/foot.ini << 'EOF'
+          [main]
+          font=monospace:size=10
+          dpi-aware=yes
+
+          [colors]
+          background=282828
+          foreground=ebdbb2
+          EOF
+
+          echo "Setting ownership..."
+          sudo arch-chroot /mnt/arch chown -R uconsole:uconsole /home/uconsole/.config
+
+      - name: Configure auto-login
+        run: |
+          echo "Creating .bash_profile for auto-start Sway..."
+          sudo tee /mnt/arch/home/uconsole/.bash_profile << 'EOF'
+          # Start Sway on tty1
+          if [ -z "$DISPLAY" ] && [ "$XDG_VTNR" = 1 ]; then
+              exec sway
+          fi
+          EOF
+          sudo arch-chroot /mnt/arch chown uconsole:uconsole /home/uconsole/.bash_profile
+
+          echo "Enabling auto-login on tty1..."
+          sudo mkdir -p /mnt/arch/etc/systemd/system/getty@tty1.service.d
+          sudo tee /mnt/arch/etc/systemd/system/getty@tty1.service.d/autologin.conf << 'EOF'
+          [Service]
+          ExecStart=
+          ExecStart=-/sbin/agetty -o '-p -f -- \\u' --noclear --autologin uconsole %I $TERM
+          EOF
+
+      - name: Cleanup and unmount
+        run: |
+          LOOP_DEVICE="${{ steps.loop.outputs.loop_device }}"
+
+          echo "Syncing filesystem..."
+          sync
+
+          echo "Unmounting..."
+          sudo umount /mnt/arch/dev/pts || true
+          sudo umount /mnt/arch/dev || true
+          sudo umount /mnt/arch/proc || true
+          sudo umount /mnt/arch/sys || true
+          sudo umount /mnt/arch/boot || true
+          sudo umount /mnt/arch || true
+
+          echo "Detaching loop device..."
+          sudo losetup -d "${LOOP_DEVICE}"
+
+      - name: Compress image
+        run: |
+          echo "Compressing image with xz..."
+          xz -T0 -9 --verbose ${{ env.IMAGE_NAME }}.img
+          ls -lh ${{ env.IMAGE_NAME }}.img.xz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.IMAGE_NAME }}.img.xz
+          path: ${{ env.IMAGE_NAME }}.img.xz
+          retention-days: 30
+
+      - name: Create release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: arch-sway-cm5-${{ github.run_number }}
+          name: Arch Linux ARM + Sway for uConsole CM5 (Build ${{ github.run_number }})
+          body: |
+            ## Arch Linux ARM + Sway for uConsole CM5
+
+            **Features:**
+            - Arch Linux ARM base system
+            - Sway (Wayland compositor) window manager
+            - PeterCxy's linux-clockworkpi-git kernel for CM5 support
+            - Full hardware support (display, WiFi, audio, backlight, trackball)
+            - Auto-login to Sway desktop
+
+            **Default Credentials:**
+            - Username: `uconsole`
+            - Password: `uconsole`
+
+            **Installation:**
+            ```bash
+            xz -dc ${{ env.IMAGE_NAME }}.img.xz | sudo dd of=/dev/sdX bs=4M status=progress
+            sudo sync
+            ```
+
+            **Key Bindings (Sway uses Alt as modifier):**
+            - `Alt+Enter` - Open terminal
+            - `Alt+d` - Application launcher
+            - `Alt+Shift+q` - Close window
+            - `Alt+1-5` - Switch workspaces
+
+            Based on [PeterCxy's work](https://typeblog.net/61092/).
+          files: ${{ env.IMAGE_NAME }}.img.xz
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
