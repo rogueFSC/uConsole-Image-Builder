@@ -1,8 +1,56 @@
 # uConsole Image Builder Scripts
 
-This directory contains scripts to build Debian and Ubuntu rootfs images for the uConsole CM4.
+This directory contains scripts to build Linux images for the uConsole CM4 and CM5.
+
+## Supported Configurations
+
+| Script | Distro | Desktop | Hardware | Package Manager |
+|--------|--------|---------|----------|-----------------|
+| `build-image.sh` + `setup-suite.sh` | Debian/Ubuntu | Various | CM4 | apt |
+| `build_arch_sway_cm5.sh` | Arch Linux ARM | Sway | CM5 | pacman |
 
 ## Scripts
+
+### build_arch_sway_cm5.sh (NEW - CM5 + Sway)
+
+Creates a complete bootable Arch Linux ARM image with Sway window manager for uConsole CM5.
+
+**Features:**
+- Arch Linux ARM base system
+- PeterCxy's uConsole CM5 kernel (`linux-clockworkpi-git`)
+- Sway (Wayland compositor) configured for uConsole's screen
+- Full hardware support: display, WiFi, audio, backlight, keyboard/trackball
+- Auto-login to Sway desktop
+
+**Usage:**
+```bash
+# Create an image file
+sudo ./scripts/build_arch_sway_cm5.sh ./uconsole-arch-sway-cm5.img
+
+# Or write directly to SD card
+sudo ./scripts/build_arch_sway_cm5.sh /dev/sdX
+```
+
+**Requirements:**
+- Linux host (x86_64 or aarch64)
+- Root privileges
+- ~8GB free disk space
+- Packages: `wget`, `parted`, `arch-install-scripts`, `qemu-user-static` (for x86_64 hosts)
+
+**Default Credentials:**
+- Username: `uconsole`
+- Password: `uconsole`
+
+**Key Bindings (Sway uses Alt as modifier):**
+- `Alt+Enter` - Open terminal (foot)
+- `Alt+d` - Application launcher (wofi)
+- `Alt+Shift+q` - Close window
+- `Alt+1-5` - Switch workspaces
+- `XF86 Brightness keys` - Adjust backlight
+
+Based on [PeterCxy's work](https://typeblog.net/61092/arch-linux-arm-on-clockworkpi-uconsole-w-rpi-cm5-and-swaywm).
+
+---
 
 ### build-image.sh
 
