@@ -91,93 +91,65 @@ jobs:
           # Setup DNS (arch-chroot handles proc/sys/dev mounts automatically)
           sudo cp /etc/resolv.conf /mnt/arch/etc/resolv.conf
 
-      - name: Configure system in chroot
+      - name: Initialize pacman keyring
         run: |
-          # Create setup script
-          cat << 'CHROOT_SCRIPT' | sudo tee /mnt/arch/tmp/setup.sh
-          #!/bin/bash
-          set -e
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman-key --init && pacman-key --populate archlinuxarm"
 
-          echo "==> Initializing pacman keyring..."
-          pacman-key --init
-          pacman-key --populate archlinuxarm
+      - name: Add PeterCxy repository
+        run: |
+          echo "" | sudo tee -a /mnt/arch/etc/pacman.conf
+          echo "# uConsole CM5 kernel and packages" | sudo tee -a /mnt/arch/etc/pacman.conf
+          echo "[petercxy]" | sudo tee -a /mnt/arch/etc/pacman.conf
+          echo "SigLevel = Optional" | sudo tee -a /mnt/arch/etc/pacman.conf
+          echo 'Server = https://s3-cdn.angry.im/alarm-repo/$arch' | sudo tee -a /mnt/arch/etc/pacman.conf
 
-          echo "==> Adding PeterCxy's repository for uConsole CM5 kernel..."
-          cat >> /etc/pacman.conf << 'EOF'
+      - name: Update system and install kernel
+        run: |
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Syu --noconfirm"
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm linux-clockworkpi-git linux-clockworkpi-git-headers || pacman -S --noconfirm linux-rpi"
 
-          # uConsole CM5 kernel and packages
-          [petercxy]
-          SigLevel = Optional
-          Server = https://s3-cdn.angry.im/alarm-repo/$arch
-          EOF
+      - name: Install WiFi packages
+        run: |
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm wpa_supplicant-raspberrypi-git || pacman -S --noconfirm wpa_supplicant"
 
-          echo "==> Updating system and installing kernel..."
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm linux-clockworkpi-git linux-clockworkpi-git-headers || {
-            echo "Warning: Could not install linux-clockworkpi-git, trying fallback..."
-            pacman -S --noconfirm linux-rpi
-          }
+      - name: Install Sway and desktop packages
+        run: |
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm sway swaylock swayidle swaybg waybar foot wofi mako grim slurp wl-clipboard xdg-desktop-portal-wlr ttf-dejavu noto-fonts ttf-font-awesome pipewire pipewire-pulse wireplumber light brightnessctl networkmanager network-manager-applet bluez bluez-utils polkit sudo vim nano htop neofetch git base-devel firefox"
 
-          echo "==> Installing WiFi packages..."
-          pacman -S --noconfirm wpa_supplicant-raspberrypi-git || pacman -S --noconfirm wpa_supplicant
+      - name: Install Raspberry Pi utilities
+        run: |
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm raspberrypi-utils || true"
 
-          echo "==> Installing Sway and desktop packages..."
-          pacman -S --noconfirm \
-              sway swaylock swayidle swaybg waybar \
-              foot wofi mako grim slurp wl-clipboard \
-              xdg-desktop-portal-wlr \
-              ttf-dejavu noto-fonts ttf-font-awesome \
-              pipewire pipewire-pulse wireplumber \
-              light brightnessctl \
-              networkmanager network-manager-applet \
-              bluez bluez-utils \
-              polkit \
-              sudo vim nano htop neofetch \
-              git base-devel \
-              firefox
+      - name: Enable services
+        run: |
+          sudo arch-chroot /mnt/arch /bin/bash -c "systemctl enable NetworkManager bluetooth sshd"
 
-          echo "==> Installing Raspberry Pi utilities..."
-          pacman -S --noconfirm raspberrypi-utils || true
+      - name: Create user and configure system
+        run: |
+          # Create user
+          sudo arch-chroot /mnt/arch /bin/bash -c "useradd -m -G wheel,video,audio,input -s /bin/bash uconsole || true"
+          sudo arch-chroot /mnt/arch /bin/bash -c "echo 'uconsole:uconsole' | chpasswd"
 
-          echo "==> Enabling services..."
-          systemctl enable NetworkManager
-          systemctl enable bluetooth
-          systemctl enable sshd
+          # Configure sudo
+          echo "%wheel ALL=(ALL:ALL) ALL" | sudo tee /mnt/arch/etc/sudoers.d/wheel
+          echo "uconsole ALL=(ALL) NOPASSWD: ALL" | sudo tee /mnt/arch/etc/sudoers.d/uconsole
 
-          echo "==> Creating user..."
-          useradd -m -G wheel,video,audio,input -s /bin/bash uconsole || true
-          echo "uconsole:uconsole" | chpasswd
+          # Set hostname
+          echo "uconsole" | sudo tee /mnt/arch/etc/hostname
+          echo -e "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n127.0.1.1\tuconsole.localdomain uconsole" | sudo tee /mnt/arch/etc/hosts
 
-          echo "==> Configuring sudo..."
-          echo "%wheel ALL=(ALL:ALL) ALL" > /etc/sudoers.d/wheel
-          echo "uconsole ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/uconsole
+          # Set locale
+          echo "en_US.UTF-8 UTF-8" | sudo tee /mnt/arch/etc/locale.gen
+          sudo arch-chroot /mnt/arch /bin/bash -c "locale-gen"
+          echo "LANG=en_US.UTF-8" | sudo tee /mnt/arch/etc/locale.conf
 
-          echo "==> Setting hostname..."
-          echo "uconsole" > /etc/hostname
-          cat > /etc/hosts << 'EOF'
-          127.0.0.1   localhost
-          ::1         localhost
-          127.0.1.1   uconsole.localdomain uconsole
-          EOF
+          # Set timezone
+          sudo arch-chroot /mnt/arch /bin/bash -c "ln -sf /usr/share/zoneinfo/UTC /etc/localtime"
 
-          echo "==> Setting locale..."
-          echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
-          locale-gen
-          echo "LANG=en_US.UTF-8" > /etc/locale.conf
-
-          echo "==> Setting timezone..."
-          ln -sf /usr/share/zoneinfo/UTC /etc/localtime
-
-          echo "==> Cleaning up..."
-          pacman -Scc --noconfirm
-          rm -rf /var/cache/pacman/pkg/*
-
-          echo "==> System configuration complete!"
-          CHROOT_SCRIPT
-
-          sudo chmod +x /mnt/arch/tmp/setup.sh
-          sudo arch-chroot /mnt/arch /tmp/setup.sh
-          sudo rm /mnt/arch/tmp/setup.sh
+      - name: Cleanup package cache
+        run: |
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Scc --noconfirm || true"
+          sudo rm -rf /mnt/arch/var/cache/pacman/pkg/*
 
       - name: Create boot configuration
         run: |
