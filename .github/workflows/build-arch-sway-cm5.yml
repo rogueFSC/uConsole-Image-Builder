@@ -88,13 +88,7 @@ jobs:
           echo "Extracting Arch Linux ARM rootfs..."
           sudo bsdtar -xpf ArchLinuxARM-aarch64-latest.tar.gz -C /mnt/arch
 
-          echo "Setting up chroot environment..."
-          sudo mount --bind /dev /mnt/arch/dev
-          sudo mount --bind /dev/pts /mnt/arch/dev/pts
-          sudo mount --bind /proc /mnt/arch/proc
-          sudo mount --bind /sys /mnt/arch/sys
-
-          # Setup DNS
+          # Setup DNS (arch-chroot handles proc/sys/dev mounts automatically)
           sudo cp /etc/resolv.conf /mnt/arch/etc/resolv.conf
 
       - name: Configure system in chroot
@@ -408,10 +402,8 @@ jobs:
           sync
 
           echo "Unmounting..."
-          sudo umount /mnt/arch/dev/pts || true
-          sudo umount /mnt/arch/dev || true
-          sudo umount /mnt/arch/proc || true
-          sudo umount /mnt/arch/sys || true
+          # arch-chroot cleans up its own mounts (proc/sys/dev)
+          # We only need to unmount boot and root
           sudo umount /mnt/arch/boot || true
           sudo umount /mnt/arch || true
 
