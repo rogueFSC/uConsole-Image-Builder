@@ -133,7 +133,7 @@ jobs:
 
       - name: Install Sway and desktop packages
         run: |
-          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm sway swaylock swayidle swaybg waybar foot wofi mako grim slurp wl-clipboard xdg-desktop-portal-wlr ttf-dejavu noto-fonts ttf-font-awesome pipewire pipewire-pulse wireplumber light brightnessctl networkmanager network-manager-applet bluez bluez-utils polkit sudo vim nano htop neofetch git base-devel firefox"
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm sway swaylock swayidle swaybg waybar foot wofi mako grim slurp wl-clipboard xdg-desktop-portal-wlr ttf-dejavu noto-fonts ttf-font-awesome pipewire pipewire-pulse wireplumber light brightnessctl networkmanager network-manager-applet bluez bluez-utils polkit sudo vim nano htop fastfetch git base-devel firefox"
 
       - name: Install Raspberry Pi utilities
         run: |
