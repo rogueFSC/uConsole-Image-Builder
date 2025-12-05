@@ -107,11 +107,25 @@ jobs:
         run: |
           sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Syu --noconfirm"
 
+      - name: Remove conflicting kernel packages
+        run: |
+          # List installed kernel packages for debugging
+          echo "Currently installed kernel packages:"
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Qs linux | head -20" || true
+
+          # Force remove any conflicting kernel packages
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Rdd --noconfirm linux-aarch64" || true
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Rdd --noconfirm linux-aarch64-headers" || true
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Rdd --noconfirm linux" || true
+
+          # Verify removal
+          echo "After removal:"
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Qs linux | head -20" || true
+
       - name: Install uConsole CM5 kernel
         run: |
-          # Use --ask 4 to auto-confirm removal of conflicting linux-aarch64 package
-          sudo arch-chroot /mnt/arch /bin/bash -c "yes | pacman -S --noconfirm --ask 4 linux-clockworkpi-git linux-clockworkpi-git-headers" || \
-          sudo arch-chroot /mnt/arch /bin/bash -c "yes | pacman -S --noconfirm --ask 4 linux-rpi linux-rpi-headers"
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm linux-clockworkpi-git linux-clockworkpi-git-headers" || \
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm linux-rpi linux-rpi-headers"
 
       - name: Install WiFi packages
         run: |
