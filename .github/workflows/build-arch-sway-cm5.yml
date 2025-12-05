@@ -235,33 +235,26 @@ jobs:
         run: |
           ROOT_UUID="${{ steps.loop.outputs.root_uuid }}"
 
+          # Use PeterCxy's proven config.txt for CM5
           sudo tee /mnt/arch/boot/config.txt << 'EOF'
           # uConsole CM5 Boot Configuration
-
-          [all]
-          arm_64bit=1
-          disable_overscan=1
-          dtparam=audio=on
-          auto_initramfs=1
-          max_framebuffers=2
-
-          dtoverlay=audremap,pins_12_13
-          dtoverlay=dwc2,dr_mode=host
-          dtparam=ant2
-          dtparam=spi=on
-
-          [pi4]
-          dtoverlay=clockworkpi-uconsole
-          dtoverlay=vc4-kms-v3d-pi4,cma-384
-          dtparam=pciex1=off
-          enable_uart=1
+          # Based on PeterCxy's working config
 
           [pi5]
           dtoverlay=clockworkpi-uconsole-cm5
           dtoverlay=vc4-kms-v3d-pi5,cma-384
           dtparam=pciex1=off
-          enable_uart=1
+          enable_uart=0
+          arm_freq_min=400
 
+          [all]
+          ignore_lcd=1
+          max_framebuffers=2
+          disable_overscan=1
+          dtparam=audio=on
+          dtoverlay=audremap,pins_12_13
+          dtoverlay=dwc2,dr_mode=host
+          dtparam=ant2
           kernel=vmlinuz-linux-clockworkpi-git
           initramfs initramfs-linux-clockworkpi-git.img followkernel
           EOF
