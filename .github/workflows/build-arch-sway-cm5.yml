@@ -1,8 +1,21 @@
-name: Build Arch Linux ARM + Sway for uConsole CM5
+name: Build Arch Linux ARM for uConsole CM5
 
 on:
   workflow_dispatch:
     inputs:
+      desktop:
+        description: 'Desktop Environment / Window Manager'
+        required: true
+        default: 'sway'
+        type: choice
+        options:
+          - sway
+          - hyprland
+          - i3
+          - openbox
+          - gnome
+          - kde
+          - xfce
       create_release:
         description: 'Create GitHub release'
         required: true
@@ -10,17 +23,57 @@ on:
         type: boolean
 
 env:
-  IMAGE_NAME: uconsole-arch-sway-cm5
   ARCH_TARBALL_URL: "http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz"
 
 jobs:
-  build-arch-sway:
-    name: Build Arch Linux ARM + Sway Image
+  build-arch:
+    name: Build Arch Linux ARM + ${{ inputs.desktop }}
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
 
     steps:
+      - name: Set image name and packages
+        id: config
+        run: |
+          DESKTOP="${{ inputs.desktop }}"
+          echo "desktop=${DESKTOP}" >> $GITHUB_OUTPUT
+          echo "image_name=uconsole-arch-${DESKTOP}-cm5" >> $GITHUB_OUTPUT
+
+          # Base packages for all builds
+          BASE_PKGS="networkmanager bluez bluez-utils polkit sudo vim nano htop fastfetch git base-devel firefox ttf-dejavu noto-fonts pipewire pipewire-pulse wireplumber light brightnessctl"
+
+          case "${DESKTOP}" in
+            sway)
+              echo "packages=${BASE_PKGS} sway swaylock swayidle swaybg waybar foot wofi mako grim slurp wl-clipboard xdg-desktop-portal-wlr ttf-font-awesome" >> $GITHUB_OUTPUT
+              echo "display_server=wayland" >> $GITHUB_OUTPUT
+              ;;
+            hyprland)
+              echo "packages=${BASE_PKGS} hyprland hyprpaper waybar kitty wofi mako grim slurp wl-clipboard xdg-desktop-portal-hyprland ttf-font-awesome" >> $GITHUB_OUTPUT
+              echo "display_server=wayland" >> $GITHUB_OUTPUT
+              ;;
+            i3)
+              echo "packages=${BASE_PKGS} xorg-server xorg-xinit i3-wm i3status i3lock dmenu alacritty picom feh nitrogen dunst xclip arandr lxappearance" >> $GITHUB_OUTPUT
+              echo "display_server=x11" >> $GITHUB_OUTPUT
+              ;;
+            openbox)
+              echo "packages=${BASE_PKGS} xorg-server xorg-xinit openbox obconf obmenu tint2 alacritty feh nitrogen picom dunst xclip lxappearance pcmanfm menumaker" >> $GITHUB_OUTPUT
+              echo "display_server=x11" >> $GITHUB_OUTPUT
+              ;;
+            gnome)
+              echo "packages=${BASE_PKGS} gnome gnome-tweaks gdm" >> $GITHUB_OUTPUT
+              echo "display_server=wayland" >> $GITHUB_OUTPUT
+              ;;
+            kde)
+              echo "packages=${BASE_PKGS} plasma-meta kde-applications-meta sddm" >> $GITHUB_OUTPUT
+              echo "display_server=wayland" >> $GITHUB_OUTPUT
+              ;;
+            xfce)
+              echo "packages=${BASE_PKGS} xorg-server xfce4 xfce4-goodies lightdm lightdm-gtk-greeter" >> $GITHUB_OUTPUT
+              echo "display_server=x11" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -37,7 +90,6 @@ jobs:
             qemu-user-static \
             binfmt-support
 
-          # Ensure qemu-aarch64 is enabled
           sudo update-binfmts --enable qemu-aarch64 || true
 
       - name: Download Arch Linux ARM rootfs
@@ -48,21 +100,31 @@ jobs:
 
       - name: Create and partition image
         run: |
-          echo "Creating 8GB image file..."
-          truncate -s 8G ${{ env.IMAGE_NAME }}.img
+          IMAGE_NAME="${{ steps.config.outputs.image_name }}"
+          SIZE="8G"
+
+          # Larger size for full DEs
+          if [[ "${{ inputs.desktop }}" == "gnome" ]] || [[ "${{ inputs.desktop }}" == "kde" ]]; then
+            SIZE="12G"
+          fi
+
+          echo "Creating ${SIZE} image file..."
+          truncate -s ${SIZE} ${IMAGE_NAME}.img
 
           echo "Partitioning image..."
-          sudo parted -s ${{ env.IMAGE_NAME }}.img mklabel msdos
-          sudo parted -s ${{ env.IMAGE_NAME }}.img mkpart primary fat32 1MiB 512MiB
-          sudo parted -s ${{ env.IMAGE_NAME }}.img set 1 boot on
-          sudo parted -s ${{ env.IMAGE_NAME }}.img mkpart primary ext4 512MiB 100%
+          sudo parted -s ${IMAGE_NAME}.img mklabel msdos
+          sudo parted -s ${IMAGE_NAME}.img mkpart primary fat32 1MiB 512MiB
+          sudo parted -s ${IMAGE_NAME}.img set 1 boot on
+          sudo parted -s ${IMAGE_NAME}.img mkpart primary ext4 512MiB 100%
 
       - name: Setup loop device and format
         id: loop
         run: |
+          IMAGE_NAME="${{ steps.config.outputs.image_name }}"
+
           echo "Setting up loop device..."
           LOOP_DEVICE=$(sudo losetup -f)
-          sudo losetup -P "${LOOP_DEVICE}" ${{ env.IMAGE_NAME }}.img
+          sudo losetup -P "${LOOP_DEVICE}" ${IMAGE_NAME}.img
           echo "loop_device=${LOOP_DEVICE}" >> $GITHUB_OUTPUT
 
           sleep 2
@@ -71,7 +133,6 @@ jobs:
           sudo mkfs.vfat -F32 "${LOOP_DEVICE}p1"
           sudo mkfs.ext4 -F "${LOOP_DEVICE}p2"
 
-          # Get UUID for cmdline.txt
           ROOT_UUID=$(sudo blkid -s UUID -o value "${LOOP_DEVICE}p2")
           echo "root_uuid=${ROOT_UUID}" >> $GITHUB_OUTPUT
 
@@ -88,7 +149,6 @@ jobs:
           echo "Extracting Arch Linux ARM rootfs..."
           sudo bsdtar -xpf ArchLinuxARM-aarch64-latest.tar.gz -C /mnt/arch
 
-          # Setup DNS (arch-chroot handles proc/sys/dev mounts automatically)
           sudo cp /etc/resolv.conf /mnt/arch/etc/resolv.conf
 
       - name: Initialize pacman keyring
@@ -109,18 +169,9 @@ jobs:
 
       - name: Remove conflicting kernel packages
         run: |
-          # List installed kernel packages for debugging
-          echo "Currently installed kernel packages:"
-          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Qs linux | head -20" || true
-
-          # Force remove any conflicting kernel packages
+          echo "Removing default kernel..."
           sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Rdd --noconfirm linux-aarch64" || true
           sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Rdd --noconfirm linux-aarch64-headers" || true
-          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Rdd --noconfirm linux" || true
-
-          # Verify removal
-          echo "After removal:"
-          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Qs linux | head -20" || true
 
       - name: Install uConsole CM5 kernel
         run: |
@@ -131,9 +182,11 @@ jobs:
         run: |
           sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm wpa_supplicant-raspberrypi-git || pacman -S --noconfirm wpa_supplicant"
 
-      - name: Install Sway and desktop packages
+      - name: Install desktop environment packages
         run: |
-          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm sway swaylock swayidle swaybg waybar foot wofi mako grim slurp wl-clipboard xdg-desktop-portal-wlr ttf-dejavu noto-fonts ttf-font-awesome pipewire pipewire-pulse wireplumber light brightnessctl networkmanager network-manager-applet bluez bluez-utils polkit sudo vim nano htop fastfetch git base-devel firefox"
+          PACKAGES="${{ steps.config.outputs.packages }}"
+          echo "Installing packages: ${PACKAGES}"
+          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm ${PACKAGES}"
 
       - name: Install Raspberry Pi utilities
         run: |
@@ -143,26 +196,34 @@ jobs:
         run: |
           sudo arch-chroot /mnt/arch /bin/bash -c "systemctl enable NetworkManager bluetooth sshd"
 
+          # Enable display manager for full DEs
+          case "${{ inputs.desktop }}" in
+            gnome)
+              sudo arch-chroot /mnt/arch /bin/bash -c "systemctl enable gdm"
+              ;;
+            kde)
+              sudo arch-chroot /mnt/arch /bin/bash -c "systemctl enable sddm"
+              ;;
+            xfce)
+              sudo arch-chroot /mnt/arch /bin/bash -c "systemctl enable lightdm"
+              ;;
+          esac
+
       - name: Create user and configure system
         run: |
-          # Create user
           sudo arch-chroot /mnt/arch /bin/bash -c "useradd -m -G wheel,video,audio,input -s /bin/bash uconsole || true"
           sudo arch-chroot /mnt/arch /bin/bash -c "echo 'uconsole:uconsole' | chpasswd"
 
-          # Configure sudo
           echo "%wheel ALL=(ALL:ALL) ALL" | sudo tee /mnt/arch/etc/sudoers.d/wheel
           echo "uconsole ALL=(ALL) NOPASSWD: ALL" | sudo tee /mnt/arch/etc/sudoers.d/uconsole
 
-          # Set hostname
           echo "uconsole" | sudo tee /mnt/arch/etc/hostname
           echo -e "127.0.0.1\tlocalhost\n::1\t\tlocalhost\n127.0.1.1\tuconsole.localdomain uconsole" | sudo tee /mnt/arch/etc/hosts
 
-          # Set locale
           echo "en_US.UTF-8 UTF-8" | sudo tee /mnt/arch/etc/locale.gen
           sudo arch-chroot /mnt/arch /bin/bash -c "locale-gen"
           echo "LANG=en_US.UTF-8" | sudo tee /mnt/arch/etc/locale.conf
 
-          # Set timezone
           sudo arch-chroot /mnt/arch /bin/bash -c "ln -sf /usr/share/zoneinfo/UTC /etc/localtime"
 
       - name: Cleanup package cache
@@ -174,10 +235,8 @@ jobs:
         run: |
           ROOT_UUID="${{ steps.loop.outputs.root_uuid }}"
 
-          echo "Creating config.txt..."
           sudo tee /mnt/arch/boot/config.txt << 'EOF'
           # uConsole CM5 Boot Configuration
-          # Generated by GitHub Actions workflow
 
           [all]
           arm_64bit=1
@@ -186,198 +245,317 @@ jobs:
           auto_initramfs=1
           max_framebuffers=2
 
-          # Audio remapping for uConsole speaker
           dtoverlay=audremap,pins_12_13
           dtoverlay=dwc2,dr_mode=host
-
-          # Antenna configuration
           dtparam=ant2
-
-          # SPI for display
           dtparam=spi=on
 
           [pi4]
-          # CM4 fallback
           dtoverlay=clockworkpi-uconsole
           dtoverlay=vc4-kms-v3d-pi4,cma-384
           dtparam=pciex1=off
           enable_uart=1
 
           [pi5]
-          # CM5 primary configuration
           dtoverlay=clockworkpi-uconsole-cm5
           dtoverlay=vc4-kms-v3d-pi5,cma-384
           dtparam=pciex1=off
           enable_uart=1
 
-          # Kernel and initramfs
           kernel=vmlinuz-linux-clockworkpi-git
           initramfs initramfs-linux-clockworkpi-git.img followkernel
           EOF
 
-          echo "Creating cmdline.txt..."
           echo "root=UUID=${ROOT_UUID} rw rootwait console=tty1 loglevel=4" | sudo tee /mnt/arch/boot/cmdline.txt
 
       - name: Create Sway configuration
+        if: inputs.desktop == 'sway'
         run: |
-          echo "Creating Sway config directory..."
-          sudo mkdir -p /mnt/arch/home/uconsole/.config/sway
-          sudo mkdir -p /mnt/arch/home/uconsole/.config/waybar
-          sudo mkdir -p /mnt/arch/home/uconsole/.config/foot
+          sudo mkdir -p /mnt/arch/home/uconsole/.config/{sway,waybar,foot}
 
-          echo "Creating Sway config..."
           sudo tee /mnt/arch/home/uconsole/.config/sway/config << 'EOF'
-          # Sway configuration for ClockworkPi uConsole
-          # Use Alt as modifier (uConsole has no Super key)
           set $mod Mod1
           set $term foot
           set $menu wofi --show drun
 
-          # Display configuration for uConsole 5" screen
           output DSI-2 scale 1.2
 
-          # Trackball scroll emulation
           input type:pointer {
               scroll_button button3
               scroll_method on_button_down
               natural_scroll enabled
           }
 
-          input type:keyboard {
-              xkb_layout us
-          }
+          input type:keyboard { xkb_layout us }
 
-          # Key bindings
           bindsym $mod+Return exec $term
           bindsym $mod+d exec $menu
           bindsym $mod+Shift+q kill
           bindsym $mod+Shift+c reload
           bindsym $mod+Shift+e exec swaynag -t warning -m 'Exit sway?' -B 'Yes' 'swaymsg exit'
 
-          # Focus
           bindsym $mod+h focus left
           bindsym $mod+j focus down
           bindsym $mod+k focus up
           bindsym $mod+l focus right
-          bindsym $mod+Left focus left
-          bindsym $mod+Down focus down
-          bindsym $mod+Up focus up
-          bindsym $mod+Right focus right
 
-          # Move windows
           bindsym $mod+Shift+h move left
           bindsym $mod+Shift+j move down
           bindsym $mod+Shift+k move up
           bindsym $mod+Shift+l move right
 
-          # Workspaces
-          bindsym $mod+1 workspace number 1
-          bindsym $mod+2 workspace number 2
-          bindsym $mod+3 workspace number 3
-          bindsym $mod+4 workspace number 4
-          bindsym $mod+5 workspace number 5
+          bindsym $mod+1 workspace 1
+          bindsym $mod+2 workspace 2
+          bindsym $mod+3 workspace 3
+          bindsym $mod+4 workspace 4
+          bindsym $mod+5 workspace 5
 
-          bindsym $mod+Shift+1 move container to workspace number 1
-          bindsym $mod+Shift+2 move container to workspace number 2
-          bindsym $mod+Shift+3 move container to workspace number 3
-          bindsym $mod+Shift+4 move container to workspace number 4
-          bindsym $mod+Shift+5 move container to workspace number 5
+          bindsym $mod+Shift+1 move container to workspace 1
+          bindsym $mod+Shift+2 move container to workspace 2
+          bindsym $mod+Shift+3 move container to workspace 3
+          bindsym $mod+Shift+4 move container to workspace 4
+          bindsym $mod+Shift+5 move container to workspace 5
 
-          # Layout
           bindsym $mod+b splith
           bindsym $mod+v splitv
           bindsym $mod+f fullscreen
           bindsym $mod+Shift+space floating toggle
-          bindsym $mod+space focus mode_toggle
-          bindsym $mod+r mode "resize"
 
-          mode "resize" {
-              bindsym h resize shrink width 10px
-              bindsym j resize grow height 10px
-              bindsym k resize shrink height 10px
-              bindsym l resize grow width 10px
-              bindsym Return mode "default"
-              bindsym Escape mode "default"
-          }
-
-          # Backlight (discrete steps for uConsole)
-          bindsym --locked XF86MonBrightnessUp exec light -S "$(light -G | awk '{ print (int($1 / 10) + 2) * 10 }')"
-          bindsym --locked XF86MonBrightnessDown exec light -S "$(light -G | awk '{ v = (int($1 / 10) - 2) * 10; print (v < 20 ? 20 : v) }')"
-
-          # Volume
+          bindsym --locked XF86MonBrightnessUp exec light -A 10
+          bindsym --locked XF86MonBrightnessDown exec light -U 10
           bindsym --locked XF86AudioRaiseVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
           bindsym --locked XF86AudioLowerVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
           bindsym --locked XF86AudioMute exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
 
-          # Screenshot
-          bindsym Print exec grim -g "$(slurp)" - | wl-copy
-
-          # Lock
-          bindsym $mod+Ctrl+l exec swaylock -f -c 000000
-
-          # Idle
-          exec swayidle -w \
-              timeout 300 'swaylock -f -c 000000' \
-              timeout 600 'swaymsg "output * dpms off"' \
-              resume 'swaymsg "output * dpms on"'
-
-          # Status bar
-          bar {
-              position top
-              status_command waybar
-          }
-
-          # Autostart
+          bar { position top; status_command waybar; }
           exec mako
-
-          # Styling
           default_border pixel 2
           gaps inner 5
-          gaps outer 5
           EOF
 
-          echo "Creating Waybar config..."
           sudo tee /mnt/arch/home/uconsole/.config/waybar/config << 'EOF'
-          {
-              "layer": "top",
-              "position": "top",
-              "height": 24,
-              "modules-left": ["sway/workspaces", "sway/mode"],
-              "modules-center": ["sway/window"],
-              "modules-right": ["pulseaudio", "network", "battery", "clock"],
-              "clock": { "format": "{:%H:%M}", "format-alt": "{:%Y-%m-%d}" },
-              "battery": { "format": "{icon} {capacity}%", "format-icons": ["", "", "", "", ""] },
-              "network": { "format-wifi": " {signalStrength}%", "format-disconnected": "" },
-              "pulseaudio": { "format": "{icon} {volume}%", "format-muted": "", "format-icons": { "default": ["", "", ""] } }
-          }
+          {"layer":"top","position":"top","height":24,"modules-left":["sway/workspaces"],"modules-center":["sway/window"],"modules-right":["pulseaudio","network","battery","clock"],"clock":{"format":"{:%H:%M}"},"battery":{"format":"{icon} {capacity}%","format-icons":["","","","",""]},"network":{"format-wifi":" {signalStrength}%"},"pulseaudio":{"format":"{icon} {volume}%","format-icons":{"default":["",""]}}}
           EOF
 
-          echo "Creating Foot config..."
           sudo tee /mnt/arch/home/uconsole/.config/foot/foot.ini << 'EOF'
           [main]
           font=monospace:size=10
-          dpi-aware=yes
-
           [colors]
           background=282828
           foreground=ebdbb2
           EOF
 
-          echo "Setting ownership..."
           sudo arch-chroot /mnt/arch chown -R uconsole:uconsole /home/uconsole/.config
 
-      - name: Configure auto-login
+      - name: Create Hyprland configuration
+        if: inputs.desktop == 'hyprland'
         run: |
-          echo "Creating .bash_profile for auto-start Sway..."
-          sudo tee /mnt/arch/home/uconsole/.bash_profile << 'EOF'
-          # Start Sway on tty1
-          if [ -z "$DISPLAY" ] && [ "$XDG_VTNR" = 1 ]; then
-              exec sway
+          sudo mkdir -p /mnt/arch/home/uconsole/.config/{hypr,waybar,kitty}
+
+          sudo tee /mnt/arch/home/uconsole/.config/hypr/hyprland.conf << 'EOF'
+          monitor=DSI-2,preferred,auto,1.2
+
+          $terminal = kitty
+          $menu = wofi --show drun
+          $mod = ALT
+
+          exec-once = waybar & mako
+
+          input {
+              kb_layout = us
+              follow_mouse = 1
+              touchpad { natural_scroll = yes }
+          }
+
+          general {
+              gaps_in = 5
+              gaps_out = 10
+              border_size = 2
+              col.active_border = rgba(33ccffee)
+              col.inactive_border = rgba(595959aa)
+          }
+
+          decoration { rounding = 5 }
+
+          bind = $mod, Return, exec, $terminal
+          bind = $mod, D, exec, $menu
+          bind = $mod SHIFT, Q, killactive
+          bind = $mod SHIFT, E, exit
+          bind = $mod, F, fullscreen
+          bind = $mod SHIFT, SPACE, togglefloating
+
+          bind = $mod, H, movefocus, l
+          bind = $mod, L, movefocus, r
+          bind = $mod, K, movefocus, u
+          bind = $mod, J, movefocus, d
+
+          bind = $mod, 1, workspace, 1
+          bind = $mod, 2, workspace, 2
+          bind = $mod, 3, workspace, 3
+          bind = $mod, 4, workspace, 4
+          bind = $mod, 5, workspace, 5
+
+          bind = $mod SHIFT, 1, movetoworkspace, 1
+          bind = $mod SHIFT, 2, movetoworkspace, 2
+          bind = $mod SHIFT, 3, movetoworkspace, 3
+          bind = $mod SHIFT, 4, movetoworkspace, 4
+          bind = $mod SHIFT, 5, movetoworkspace, 5
+
+          bindel = , XF86MonBrightnessUp, exec, light -A 10
+          bindel = , XF86MonBrightnessDown, exec, light -U 10
+          bindel = , XF86AudioRaiseVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
+          bindel = , XF86AudioLowerVolume, exec, wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+          bindl = , XF86AudioMute, exec, wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
+          EOF
+
+          sudo arch-chroot /mnt/arch chown -R uconsole:uconsole /home/uconsole/.config
+
+      - name: Create i3 configuration
+        if: inputs.desktop == 'i3'
+        run: |
+          sudo mkdir -p /mnt/arch/home/uconsole/.config/i3
+
+          sudo tee /mnt/arch/home/uconsole/.config/i3/config << 'EOF'
+          set $mod Mod1
+
+          font pango:DejaVu Sans 10
+
+          bindsym $mod+Return exec alacritty
+          bindsym $mod+d exec dmenu_run
+          bindsym $mod+Shift+q kill
+          bindsym $mod+Shift+c reload
+          bindsym $mod+Shift+r restart
+          bindsym $mod+Shift+e exec "i3-nagbar -t warning -m 'Exit i3?' -B 'Yes' 'i3-msg exit'"
+
+          bindsym $mod+h focus left
+          bindsym $mod+j focus down
+          bindsym $mod+k focus up
+          bindsym $mod+l focus right
+
+          bindsym $mod+Shift+h move left
+          bindsym $mod+Shift+j move down
+          bindsym $mod+Shift+k move up
+          bindsym $mod+Shift+l move right
+
+          bindsym $mod+b split h
+          bindsym $mod+v split v
+          bindsym $mod+f fullscreen toggle
+          bindsym $mod+Shift+space floating toggle
+
+          bindsym $mod+1 workspace 1
+          bindsym $mod+2 workspace 2
+          bindsym $mod+3 workspace 3
+          bindsym $mod+4 workspace 4
+          bindsym $mod+5 workspace 5
+
+          bindsym $mod+Shift+1 move container to workspace 1
+          bindsym $mod+Shift+2 move container to workspace 2
+          bindsym $mod+Shift+3 move container to workspace 3
+          bindsym $mod+Shift+4 move container to workspace 4
+          bindsym $mod+Shift+5 move container to workspace 5
+
+          bindsym XF86MonBrightnessUp exec light -A 10
+          bindsym XF86MonBrightnessDown exec light -U 10
+          bindsym XF86AudioRaiseVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+
+          bindsym XF86AudioLowerVolume exec wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-
+          bindsym XF86AudioMute exec wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle
+
+          bar { status_command i3status; position top; }
+
+          exec --no-startup-id picom -b
+          exec --no-startup-id nitrogen --restore
+          exec --no-startup-id dunst
+
+          gaps inner 5
+          gaps outer 5
+          for_window [class=".*"] border pixel 2
+          EOF
+
+          sudo tee /mnt/arch/home/uconsole/.xinitrc << 'EOF'
+          exec i3
+          EOF
+
+          sudo arch-chroot /mnt/arch chown -R uconsole:uconsole /home/uconsole/.config /home/uconsole/.xinitrc
+
+      - name: Create Openbox configuration
+        if: inputs.desktop == 'openbox'
+        run: |
+          sudo mkdir -p /mnt/arch/home/uconsole/.config/openbox
+
+          sudo tee /mnt/arch/home/uconsole/.config/openbox/rc.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <openbox_config xmlns="http://openbox.org/3.4/rc">
+            <resistance><strength>10</strength><screen_edge_strength>20</screen_edge_strength></resistance>
+            <focus><focusNew>yes</focusNew><followMouse>no</followMouse></focus>
+            <theme><name>Clearlooks</name><titleLayout>NLIMC</titleLayout></theme>
+            <desktops><number>5</number><firstdesk>1</firstdesk></desktops>
+            <keyboard>
+              <keybind key="A-Return"><action name="Execute"><execute>alacritty</execute></action></keybind>
+              <keybind key="A-d"><action name="Execute"><execute>dmenu_run</execute></action></keybind>
+              <keybind key="A-S-q"><action name="Close"/></keybind>
+              <keybind key="A-f"><action name="ToggleFullscreen"/></keybind>
+              <keybind key="A-S-space"><action name="ToggleFloating"/></keybind>
+              <keybind key="A-1"><action name="GoToDesktop"><to>1</to></action></keybind>
+              <keybind key="A-2"><action name="GoToDesktop"><to>2</to></action></keybind>
+              <keybind key="A-3"><action name="GoToDesktop"><to>3</to></action></keybind>
+              <keybind key="A-4"><action name="GoToDesktop"><to>4</to></action></keybind>
+              <keybind key="A-5"><action name="GoToDesktop"><to>5</to></action></keybind>
+              <keybind key="A-S-1"><action name="SendToDesktop"><to>1</to></action></keybind>
+              <keybind key="A-S-2"><action name="SendToDesktop"><to>2</to></action></keybind>
+              <keybind key="A-S-3"><action name="SendToDesktop"><to>3</to></action></keybind>
+              <keybind key="A-S-4"><action name="SendToDesktop"><to>4</to></action></keybind>
+              <keybind key="A-S-5"><action name="SendToDesktop"><to>5</to></action></keybind>
+              <keybind key="A-h"><action name="DirectionalCycleWindows"><direction>left</direction></action></keybind>
+              <keybind key="A-j"><action name="DirectionalCycleWindows"><direction>down</direction></action></keybind>
+              <keybind key="A-k"><action name="DirectionalCycleWindows"><direction>up</direction></action></keybind>
+              <keybind key="A-l"><action name="DirectionalCycleWindows"><direction>right</direction></action></keybind>
+              <keybind key="XF86MonBrightnessUp"><action name="Execute"><execute>light -A 10</execute></action></keybind>
+              <keybind key="XF86MonBrightnessDown"><action name="Execute"><execute>light -U 10</execute></action></keybind>
+              <keybind key="XF86AudioRaiseVolume"><action name="Execute"><execute>wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+</execute></action></keybind>
+              <keybind key="XF86AudioLowerVolume"><action name="Execute"><execute>wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-</execute></action></keybind>
+              <keybind key="XF86AudioMute"><action name="Execute"><execute>wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle</execute></action></keybind>
+            </keyboard>
+            <mouse><context name="Frame"><mousebind button="A-Left" action="Drag"><action name="Move"/></mousebind><mousebind button="A-Right" action="Drag"><action name="Resize"/></mousebind></context></mouse>
+          </openbox_config>
+          EOF
+
+          sudo tee /mnt/arch/home/uconsole/.config/openbox/autostart << 'EOF'
+          picom -b &
+          tint2 &
+          nitrogen --restore &
+          dunst &
+          EOF
+
+          sudo tee /mnt/arch/home/uconsole/.xinitrc << 'EOF'
+          exec openbox-session
+          EOF
+
+          sudo arch-chroot /mnt/arch chown -R uconsole:uconsole /home/uconsole/.config /home/uconsole/.xinitrc
+
+      - name: Configure auto-login for WM
+        if: inputs.desktop == 'sway' || inputs.desktop == 'hyprland' || inputs.desktop == 'i3' || inputs.desktop == 'openbox'
+        run: |
+          DESKTOP="${{ inputs.desktop }}"
+
+          # Create .bash_profile for auto-start
+          if [[ "${DESKTOP}" == "sway" ]]; then
+            START_CMD="exec sway"
+          elif [[ "${DESKTOP}" == "hyprland" ]]; then
+            START_CMD="exec Hyprland"
+          elif [[ "${DESKTOP}" == "i3" ]] || [[ "${DESKTOP}" == "openbox" ]]; then
+            START_CMD="exec startx"
+          fi
+
+          sudo tee /mnt/arch/home/uconsole/.bash_profile << EOF
+          # Auto-start ${DESKTOP} on tty1
+          if [ -z "\$DISPLAY" ] && [ "\$XDG_VTNR" = 1 ]; then
+              ${START_CMD}
           fi
           EOF
+
           sudo arch-chroot /mnt/arch chown uconsole:uconsole /home/uconsole/.bash_profile
 
-          echo "Enabling auto-login on tty1..."
+          # Enable auto-login on tty1
           sudo mkdir -p /mnt/arch/etc/systemd/system/getty@tty1.service.d
           sudo tee /mnt/arch/etc/systemd/system/getty@tty1.service.d/autologin.conf << 'EOF'
           [Service]
@@ -389,46 +567,42 @@ jobs:
         run: |
           LOOP_DEVICE="${{ steps.loop.outputs.loop_device }}"
 
-          echo "Syncing filesystem..."
           sync
-
-          echo "Unmounting..."
-          # arch-chroot cleans up its own mounts (proc/sys/dev)
-          # We only need to unmount boot and root
           sudo umount /mnt/arch/boot || true
           sudo umount /mnt/arch || true
-
-          echo "Detaching loop device..."
           sudo losetup -d "${LOOP_DEVICE}"
 
       - name: Compress image
         run: |
+          IMAGE_NAME="${{ steps.config.outputs.image_name }}"
           echo "Compressing image with xz..."
-          xz -T0 -9 --verbose ${{ env.IMAGE_NAME }}.img
-          ls -lh ${{ env.IMAGE_NAME }}.img.xz
+          xz -T0 -9 --verbose ${IMAGE_NAME}.img
+          ls -lh ${IMAGE_NAME}.img.xz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.IMAGE_NAME }}.img.xz
-          path: ${{ env.IMAGE_NAME }}.img.xz
+          name: ${{ steps.config.outputs.image_name }}.img.xz
+          path: ${{ steps.config.outputs.image_name }}.img.xz
           retention-days: 30
 
       - name: Create release
         if: ${{ inputs.create_release }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: arch-sway-cm5-${{ github.run_number }}
-          name: Arch Linux ARM + Sway for uConsole CM5 (Build ${{ github.run_number }})
+          tag_name: arch-${{ inputs.desktop }}-cm5-${{ github.run_number }}
+          name: Arch Linux ARM + ${{ inputs.desktop }} for uConsole CM5 (Build ${{ github.run_number }})
           body: |
-            ## Arch Linux ARM + Sway for uConsole CM5
+            ## Arch Linux ARM + ${{ inputs.desktop }} for uConsole CM5
+
+            **Desktop/WM:** ${{ inputs.desktop }}
+            **Display Server:** ${{ steps.config.outputs.display_server }}
 
             **Features:**
             - Arch Linux ARM base system
-            - Sway (Wayland compositor) window manager
             - PeterCxy's linux-clockworkpi-git kernel for CM5 support
             - Full hardware support (display, WiFi, audio, backlight, trackball)
-            - Auto-login to Sway desktop
+            - Auto-login to desktop
 
             **Default Credentials:**
             - Username: `uconsole`
@@ -436,18 +610,18 @@ jobs:
 
             **Installation:**
             ```bash
-            xz -dc ${{ env.IMAGE_NAME }}.img.xz | sudo dd of=/dev/sdX bs=4M status=progress
+            xz -dc ${{ steps.config.outputs.image_name }}.img.xz | sudo dd of=/dev/sdX bs=4M status=progress
             sudo sync
             ```
 
-            **Key Bindings (Sway uses Alt as modifier):**
+            **Key Bindings (Alt as modifier):**
             - `Alt+Enter` - Open terminal
             - `Alt+d` - Application launcher
             - `Alt+Shift+q` - Close window
             - `Alt+1-5` - Switch workspaces
 
             Based on [PeterCxy's work](https://typeblog.net/61092/).
-          files: ${{ env.IMAGE_NAME }}.img.xz
+          files: ${{ steps.config.outputs.image_name }}.img.xz
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
