@@ -103,16 +103,15 @@ jobs:
           echo "SigLevel = Optional" | sudo tee -a /mnt/arch/etc/pacman.conf
           echo 'Server = https://s3-cdn.angry.im/alarm-repo/$arch' | sudo tee -a /mnt/arch/etc/pacman.conf
 
-      - name: Update system and remove default kernel
+      - name: Update system
         run: |
           sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Syu --noconfirm"
-          # Remove the default linux-aarch64 kernel to avoid conflicts
-          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -Rdd --noconfirm linux-aarch64 linux-aarch64-headers || true"
 
       - name: Install uConsole CM5 kernel
         run: |
-          # Install PeterCxy's kernel (or fallback to linux-rpi)
-          sudo arch-chroot /mnt/arch /bin/bash -c "pacman -S --noconfirm linux-clockworkpi-git linux-clockworkpi-git-headers || pacman -S --noconfirm linux-rpi linux-rpi-headers"
+          # Use --ask 4 to auto-confirm removal of conflicting linux-aarch64 package
+          sudo arch-chroot /mnt/arch /bin/bash -c "yes | pacman -S --noconfirm --ask 4 linux-clockworkpi-git linux-clockworkpi-git-headers" || \
+          sudo arch-chroot /mnt/arch /bin/bash -c "yes | pacman -S --noconfirm --ask 4 linux-rpi linux-rpi-headers"
 
       - name: Install WiFi packages
         run: |
